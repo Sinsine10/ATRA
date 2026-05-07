@@ -126,10 +126,6 @@ _ensure_stored_briefing()
 
 with st.sidebar:
     st.subheader("Load data")
-    st.caption(
-        "Cloud deploys start with an empty database. Fetch a small **cs.AI** slice from arXiv, "
-        "then summarize, tag, and refresh the briefing (~30–90s)."
-    )
     if st.button("Fetch sample papers from arXiv"):
         path = db_path()
         init_db(path)
@@ -143,22 +139,7 @@ with st.sidebar:
             st.stop()
         st.rerun()
     st.divider()
-    st.subheader("Daily briefing")
-    st.caption("Uses papers already in the database (does not fetch new articles).")
-    if st.button("Regenerate briefing"):
-        generate_and_store_daily_insight(db_path())
-        load_latest_briefing.clear()
-        st.success("Briefing updated.")
-        st.rerun()
-    st.divider()
     st.subheader("Daily trend updates")
-    st.caption(
-        "Trends use whatever is in the database. **Run full daily update** pulls all default arXiv "
-        "categories + OpenAlex, then re-tags and refreshes the briefing (several minutes). "
-        "For automatic runs while the app is open, set **ATRA_AUTO_DAILY_INGEST=1** in Streamlit "
-        "secrets and tune **ATRA_DAILY_MIN_INTERVAL_HOURS** (default 18), **ATRA_DAILY_ARXIV_LIMIT**, "
-        "**ATRA_DAILY_OPENALEX_LIMIT**."
-    )
     if st.button("Run full daily update now"):
         path = db_path()
         init_db(path)
