@@ -143,6 +143,29 @@ def _sync_streamlit_secrets_into_environ() -> None:
         if val and str(val).strip():
             os.environ[key] = str(val).strip()
 
+    # Optional nested secrets (e.g. [postgres] url = "..." in secrets.toml)
+    if not any(
+        os.environ.get(k, "").strip().startswith(("postgresql://", "postgres://"))
+        for k in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
+    ):
+        try:
+            for section in ("postgres", "postgresql", "supabase"):
+                if section not in sec:
+                    continue
+                blob = sec[section]
+                if isinstance(blob, str) and blob.strip().startswith(
+                    ("postgresql://", "postgres://")
+                ):
+                    os.environ.setdefault("ATRA_DATABASE_URL", blob.strip())
+                    break
+                if isinstance(blob, dict):
+                    u = blob.get("url") or blob.get("uri") or blob.get("connection_url")
+                    if u and str(u).strip().startswith(("postgresql://", "postgres://")):
+                        os.environ.setdefault("ATRA_DATABASE_URL", str(u).strip())
+                        break
+        except Exception:
+            pass
+
 
 st.set_page_config(page_title="ATRA — MInT", layout="wide")
 _sync_streamlit_secrets_into_environ()
@@ -158,7 +181,25 @@ st.caption(
     + _db_hint
 )
 
-init_db(db_path())
+try:
+    init_db(db_path())
+except Exception as exc:
+    if using_postgres() and type(exc).__name__ == "OperationalError":
+        st.error("Could not connect to PostgreSQL (check Supabase host, password, and network access).")
+        st.markdown(
+            """
+**Common fixes for Streamlit Cloud + Supabase**
+
+1. **Use the connection string from Supabase** — Project Settings → Database. Prefer the **Session pooler** or **Transaction pooler** URI (port **6543**) if the direct `db.*.supabase.co:5432` host fails (IPv6 / firewall issues on some hosts).
+2. **URL-encode the password** if it contains `@`, `#`, or `:` (e.g. `p@ss` → `p%40ss`).
+3. **Append** `?sslmode=require` to the URI (the app also adds this when the host contains `supabase`).
+4. In Streamlit **Secrets**, set a top-level key: `ATRA_DATABASE_URL` = your `postgresql://...` string (or `DATABASE_URL`).
+
+See **Manage app** → logs for the full error (not shown here to avoid leaking credentials).
+            """
+        )
+        st.stop()
+    raise
 _ensure_stored_briefing()
 
 with st.sidebar:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 DEFAULT_DB_PATH = Path("data") / "atra.db"
 
@@ -18,11 +19,39 @@ _EXTRA_COLUMNS = [
 ]
 
 
+def _normalize_database_url(url: str) -> str:
+    """Merge SSL and timeout query params — Supabase requires TLS; Streamlit Cloud often omits sslmode."""
+    url = url.strip()
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        return url
+    pairs = list(parse_qsl(parsed.query, keep_blank_values=True))
+    keys = {k.lower() for k, _ in pairs}
+    host = (parsed.hostname or "").lower()
+
+    if "sslmode" not in keys:
+        require_ssl = "supabase" in host or os.environ.get(
+            "ATRA_PG_REQUIRE_SSL", ""
+        ).strip().lower() in ("1", "true", "yes")
+        if require_ssl:
+            sslmode = (os.environ.get("ATRA_PG_SSLMODE") or "require").strip() or "require"
+            pairs.append(("sslmode", sslmode))
+
+    if "connect_timeout" not in keys:
+        to = (os.environ.get("ATRA_PG_CONNECT_TIMEOUT") or "30").strip()
+        if to.isdigit():
+            pairs.append(("connect_timeout", to))
+
+    return urlunparse(parsed._replace(query=urlencode(pairs)))
+
+
 def _database_url() -> str | None:
     for key in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
         v = os.environ.get(key, "").strip()
         if v.startswith(("postgresql://", "postgres://")):
-            return v
+            return _normalize_database_url(v)
     return None
 
 
@@ -72,6 +101,7 @@ def connect(db_path: Path | None = None) -> Any:
         import psycopg
         from psycopg.rows import dict_row
 
+        # Normalized URL adds sslmode + connect_timeout for Supabase; libpq reads them from conninfo.
         return psycopg.connect(url, row_factory=dict_row)
     path.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(path))
