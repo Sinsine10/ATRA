@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlparse, urlunparse
 
 DEFAULT_DB_PATH = Path("data") / "atra.db"
 
@@ -47,11 +47,45 @@ def _normalize_database_url(url: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(pairs)))
 
 
+def _database_url_from_env_parts() -> str | None:
+    """Build URI when password special characters break a single URL string (uses proper quoting)."""
+    host = (
+        os.environ.get("ATRA_PG_HOST", "").strip()
+        or os.environ.get("SUPABASE_DB_HOST", "").strip()
+    )
+    password = (
+        os.environ.get("ATRA_PG_PASSWORD", "").strip()
+        or os.environ.get("SUPABASE_DB_PASSWORD", "").strip()
+    )
+    if not host or not password:
+        return None
+    user = (
+        os.environ.get("ATRA_PG_USER", "").strip()
+        or os.environ.get("SUPABASE_DB_USER", "").strip()
+        or "postgres"
+    )
+    database = (
+        os.environ.get("ATRA_PG_DATABASE", "").strip()
+        or os.environ.get("SUPABASE_DB_NAME", "").strip()
+        or "postgres"
+    )
+    port = (
+        os.environ.get("ATRA_PG_PORT", "").strip()
+        or os.environ.get("SUPABASE_DB_PORT", "").strip()
+        or "5432"
+    )
+    auth = f"{quote_plus(user)}:{quote_plus(password)}"
+    return f"postgresql://{auth}@{host}:{port}/{database}"
+
+
 def _database_url() -> str | None:
     for key in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
         v = os.environ.get(key, "").strip()
         if v.startswith(("postgresql://", "postgres://")):
             return _normalize_database_url(v)
+    built = _database_url_from_env_parts()
+    if built:
+        return _normalize_database_url(built)
     return None
 
 

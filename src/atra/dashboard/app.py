@@ -131,6 +131,31 @@ def _sync_streamlit_secrets_into_environ() -> None:
         sec = st.secrets
     except (RuntimeError, FileNotFoundError, AttributeError):
         return
+
+    discrete_keys = (
+        "ATRA_PG_HOST",
+        "ATRA_PG_PASSWORD",
+        "ATRA_PG_USER",
+        "ATRA_PG_DATABASE",
+        "ATRA_PG_PORT",
+        "SUPABASE_DB_HOST",
+        "SUPABASE_DB_PASSWORD",
+        "SUPABASE_DB_USER",
+        "SUPABASE_DB_NAME",
+        "SUPABASE_DB_PORT",
+    )
+    for key in discrete_keys:
+        if os.environ.get(key, "").strip():
+            continue
+        try:
+            if key not in sec:
+                continue
+        except Exception:
+            continue
+        val = sec[key]
+        if val is not None and str(val).strip():
+            os.environ[key] = str(val).strip()
+
     for key in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
         if os.environ.get(key, "").strip():
             continue
@@ -143,37 +168,52 @@ def _sync_streamlit_secrets_into_environ() -> None:
         if val and str(val).strip():
             os.environ[key] = str(val).strip()
 
-    # Optional nested secrets (e.g. [postgres] url = "..." in secrets.toml)
-    if not any(
-        os.environ.get(k, "").strip().startswith(("postgresql://", "postgres://"))
-        for k in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
-    ):
-        try:
-            for section in ("postgres", "postgresql", "supabase"):
-                if section not in sec:
+    # Optional nested secrets (e.g. [postgres] url = "..." or host/password in secrets.toml)
+    try:
+        for section in ("postgres", "postgresql", "supabase"):
+            if section not in sec:
+                continue
+            blob = sec[section]
+            if isinstance(blob, str) and blob.strip().startswith(
+                ("postgresql://", "postgres://")
+            ):
+                os.environ.setdefault("ATRA_DATABASE_URL", blob.strip())
+                continue
+            if not isinstance(blob, dict):
+                continue
+            u = blob.get("url") or blob.get("uri") or blob.get("connection_url")
+            if u and str(u).strip().startswith(("postgresql://", "postgres://")):
+                os.environ.setdefault("ATRA_DATABASE_URL", str(u).strip())
+                continue
+            nested_map = {
+                "host": "ATRA_PG_HOST",
+                "hostname": "ATRA_PG_HOST",
+                "user": "ATRA_PG_USER",
+                "username": "ATRA_PG_USER",
+                "password": "ATRA_PG_PASSWORD",
+                "database": "ATRA_PG_DATABASE",
+                "dbname": "ATRA_PG_DATABASE",
+                "port": "ATRA_PG_PORT",
+            }
+            for src_key, env_key in nested_map.items():
+                if os.environ.get(env_key, "").strip():
                     continue
-                blob = sec[section]
-                if isinstance(blob, str) and blob.strip().startswith(
-                    ("postgresql://", "postgres://")
-                ):
-                    os.environ.setdefault("ATRA_DATABASE_URL", blob.strip())
-                    break
-                if isinstance(blob, dict):
-                    u = blob.get("url") or blob.get("uri") or blob.get("connection_url")
-                    if u and str(u).strip().startswith(("postgresql://", "postgres://")):
-                        os.environ.setdefault("ATRA_DATABASE_URL", str(u).strip())
-                        break
-        except Exception:
-            pass
+                if src_key not in blob:
+                    continue
+                v = blob[src_key]
+                if v is not None and str(v).strip():
+                    os.environ.setdefault(env_key, str(v).strip())
+    except Exception:
+        pass
 
 
 st.set_page_config(page_title="ATRA — MInT", layout="wide")
 _sync_streamlit_secrets_into_environ()
 st.title("ATRA — Tech trend & research intelligence")
 _db_hint = (
-    f"Storage: **{database_backend_label()}** (PostgreSQL via `ATRA_DATABASE_URL`)."
+    f"Storage: **{database_backend_label()}** (PostgreSQL via URL or `ATRA_PG_HOST` + `ATRA_PG_PASSWORD`)."
     if using_postgres()
-    else f"Storage: **SQLite** at `{db_path()}`. On Streamlit Cloud, set **`ATRA_DATABASE_URL`** (Supabase Postgres URI) "
+    else f"Storage: **SQLite** at `{db_path()}`. On Streamlit Cloud, set **`ATRA_DATABASE_URL`** or discrete **`ATRA_PG_*`** secrets "
     "so papers and trends persist between restarts."
 )
 st.caption(
@@ -187,15 +227,26 @@ except Exception as exc:
     if using_postgres() and type(exc).__name__ == "OperationalError":
         st.error("Could not connect to PostgreSQL (check Supabase host, password, and network access).")
         st.markdown(
-            """
+            r"""
 **Common fixes for Streamlit Cloud + Supabase**
 
-1. **Use the connection string from Supabase** — Project Settings → Database. Prefer the **Session pooler** or **Transaction pooler** URI (port **6543**) if the direct `db.*.supabase.co:5432` host fails (IPv6 / firewall issues on some hosts).
-2. **URL-encode the password** if it contains `@`, `#`, or `:` (e.g. `p@ss` → `p%40ss`).
-3. **Append** `?sslmode=require` to the URI (the app also adds this when the host contains `supabase`).
-4. In Streamlit **Secrets**, set a top-level key: `ATRA_DATABASE_URL` = your `postgresql://...` string (or `DATABASE_URL`).
+1. **Replace the placeholder** — The URI must use your real password, not the text `[YOUR-PASSWORD]` (remove the square brackets too).
+2. **Prefer the pooler** — In Supabase → **Project Settings → Database**, copy the **Transaction pooler** or **Session pooler** connection string (often host like `*.pooler.supabase.com`, port **6543**). The direct host `db.*.supabase.co:5432` often fails from cloud hosts (IPv6 / network path).
+3. **Avoid broken URLs** — If your password has `@`, `#`, `:`, `/`, or spaces, either escape them in the URI or **skip the URI** and put discrete secrets instead (password is quoted automatically):
 
-See **Manage app** → logs for the full error (not shown here to avoid leaking credentials).
+```toml
+ATRA_PG_HOST = "db.YOUR_REF.supabase.co"
+ATRA_PG_USER = "postgres"
+ATRA_PG_PASSWORD = "your actual password"
+ATRA_PG_DATABASE = "postgres"
+ATRA_PG_PORT = "5432"
+```
+
+Or use the pooler host/port Supabase shows for pooling.
+
+4. **SSL** — The app adds `sslmode=require` for Supabase-style hosts when it is missing from the URL.
+
+See **Manage app** → logs for the full libpq error (not shown here to avoid leaking credentials).
             """
         )
         st.stop()
