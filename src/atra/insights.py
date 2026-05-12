@@ -17,7 +17,9 @@ from atra.db import (
     DEFAULT_DB_PATH,
     connect,
     count_papers,
+    exec_sql,
     init_db,
+    order_inserted_desc,
     save_daily_insight,
 )
 
@@ -70,14 +72,15 @@ def compute_daily_insights(db_path: Path | None = None) -> dict[str, Any]:
     con = connect(path)
     try:
         rows = list(
-            con.execute(
-                """
+            exec_sql(
+                con,
+                f"""
                 SELECT id, title, abstract, summary, published_at, inserted_at,
                        relevance_et, impact_level, sectors_json, url, source
                 FROM papers
-                ORDER BY datetime(inserted_at) DESC
+                ORDER BY {order_inserted_desc()}
                 LIMIT 8000
-                """
+                """,
             ).fetchall()
         )
         total_db = count_papers(con)

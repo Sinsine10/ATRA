@@ -10,11 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from atra.db import (
     connect,
     count_papers,
+    database_backend_label,
     get_latest_daily_insight,
     get_paper_by_id,
     init_db,
     list_daily_insights,
     query_papers,
+    using_postgres,
 )
 from atra.tagging import list_sector_names
 from atra.trends import early_signals, sector_trend_series, top_tokens
@@ -58,7 +60,11 @@ def create_app() -> FastAPI:
             n = count_papers(con)
         finally:
             con.close()
-        return {"papers": n, "db": str(_db_path())}
+        return {
+            "papers": n,
+            "db": str(_db_path()) if not using_postgres() else "postgresql",
+            "backend": database_backend_label(),
+        }
 
     @app.get("/papers")
     def papers(
@@ -122,7 +128,7 @@ def create_app() -> FastAPI:
         if not row:
             raise HTTPException(
                 status_code=404,
-                detail="No daily briefing yet. Run: python -m atra daily",
+                detail="No daily briefing yet. Run: python -m atra daily — or set ATRA_DATABASE_URL and ingest once.",
             )
         return row
 

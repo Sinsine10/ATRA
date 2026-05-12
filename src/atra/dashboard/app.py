@@ -17,7 +17,16 @@ import requests
 import streamlit as st
 
 from atra.daily_pipeline import hours_since_last_insert, run_daily
-from atra.db import connect, get_latest_daily_insight, init_db, insert_run, query_papers, upsert_papers
+from atra.db import (
+    connect,
+    database_backend_label,
+    get_latest_daily_insight,
+    init_db,
+    insert_run,
+    query_papers,
+    upsert_papers,
+    using_postgres,
+)
 from atra.insights import generate_and_store_daily_insight
 from atra.summarize import summarize_missing
 from atra.sources.arxiv import ArxivIngestParams, fetch_arxiv
@@ -26,6 +35,7 @@ from atra.trends import early_signals, sector_trend_series, top_tokens
 
 
 def db_path() -> Path:
+    """SQLite file path when not using PostgreSQL; ignored by ``connect()`` when ``ATRA_DATABASE_URL`` is set."""
     return Path(os.environ.get("ATRA_DB_PATH", "data/atra.db"))
 
 
@@ -115,10 +125,37 @@ def _scheduled_daily_ingest() -> None:
         return
 
 
+def _sync_streamlit_secrets_into_environ() -> None:
+    """Copy database URL from ``st.secrets`` to ``os.environ`` (Streamlit Cloud does not do this automatically)."""
+    try:
+        sec = st.secrets
+    except (RuntimeError, FileNotFoundError, AttributeError):
+        return
+    for key in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
+        if os.environ.get(key, "").strip():
+            continue
+        try:
+            if key not in sec:
+                continue
+        except Exception:
+            continue
+        val = sec[key]
+        if val and str(val).strip():
+            os.environ[key] = str(val).strip()
+
+
 st.set_page_config(page_title="ATRA — MInT", layout="wide")
+_sync_streamlit_secrets_into_environ()
 st.title("ATRA — Tech trend & research intelligence")
+_db_hint = (
+    f"Storage: **{database_backend_label()}** (PostgreSQL via `ATRA_DATABASE_URL`)."
+    if using_postgres()
+    else f"Storage: **SQLite** at `{db_path()}`. On Streamlit Cloud, set **`ATRA_DATABASE_URL`** (Supabase Postgres URI) "
+    "so papers and trends persist between restarts."
+)
 st.caption(
-    "Ministry of Innovation and Technology · Daily briefing refreshes from the database every ~2 minutes while this page is open."
+    "Ministry of Innovation and Technology · Daily briefing refreshes from the database every ~2 minutes while this page is open. "
+    + _db_hint
 )
 
 init_db(db_path())
@@ -135,7 +172,7 @@ with st.sidebar:
             load_latest_briefing.clear()
             st.success(f"Stored {ins} new papers ({sk} duplicates skipped). Refreshing…")
         except (OSError, requests.RequestException) as exc:
-            st.error(f"Could not reach arXiv or save the database: {exc}")
+            st.error(f"Could not reach arXiv or save data ({database_backend_label()}): {exc}")
             st.stop()
         st.rerun()
     st.divider()
@@ -149,7 +186,7 @@ with st.sidebar:
             load_latest_briefing.clear()
             st.success("Daily update finished. Refreshing…")
         except (OSError, requests.RequestException) as exc:
-            st.error(f"Daily update failed (network or disk): {exc}")
+            st.error(f"Daily update failed (network or database): {exc}")
             st.stop()
         st.rerun()
     st.divider()
@@ -188,9 +225,8 @@ with tab0:
     briefing = load_latest_briefing()
     if not briefing:
         st.warning(
-            "No briefing could be loaded. Check that the database path is writable and try "
-            "**Regenerate briefing** in the sidebar, or run **`python -m atra daily`** / **`python -m atra insights`** "
-            "where the SQLite file lives."
+            "No briefing could be loaded. Add papers (sidebar), or run **`python -m atra daily`** / **`python -m atra insights`** "
+            "against the same database. If you use PostgreSQL, confirm **`ATRA_DATABASE_URL`** is set in this app’s secrets."
         )
     else:
         st.subheader(f"Report date: {briefing.get('report_for_date', '—')}")
@@ -226,7 +262,7 @@ with tab1:
     if not papers:
         st.info(
             "No papers in the database yet. Use **Fetch sample papers from arXiv** in the sidebar, "
-            "or run **`python -m atra daily`** where the SQLite file is stored."
+            "or run **`python -m atra daily`** pointed at the same database (SQLite path or `ATRA_DATABASE_URL`)."
         )
     else:
         rows = []

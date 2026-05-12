@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from atra.db import DEFAULT_DB_PATH, connect, init_db
+from atra.db import DEFAULT_DB_PATH, connect, exec_sql, init_db
 
 # Ethiopia-relevant sectors (MInT / Digital 2025–30 alignment)
 SECTOR_KEYWORDS: dict[str, list[str]] = {
@@ -199,7 +199,8 @@ def tag_missing_papers(db_path: Path | None = None, batch_limit: int = 500) -> i
     con = connect(path)
     updated = 0
     try:
-        cur = con.execute(
+        cur = exec_sql(
+            con,
             """
             SELECT id, title, abstract, summary, cited_by_count
             FROM papers
@@ -215,7 +216,8 @@ def tag_missing_papers(db_path: Path | None = None, batch_limit: int = 500) -> i
                 row["summary"],
                 row["cited_by_count"],
             )
-            con.execute(
+            exec_sql(
+                con,
                 """
                 UPDATE papers
                 SET relevance_et = ?, impact_level = ?, sectors_json = ?
@@ -237,7 +239,8 @@ def re_tag_all(db_path: Path | None = None, batch_limit: int = 2000) -> int:
     con = connect(path)
     updated = 0
     try:
-        cur = con.execute(
+        cur = exec_sql(
+            con,
             """
             SELECT id, title, abstract, summary, cited_by_count
             FROM papers ORDER BY id ASC LIMIT ?
@@ -251,7 +254,8 @@ def re_tag_all(db_path: Path | None = None, batch_limit: int = 2000) -> int:
                 row["summary"],
                 row["cited_by_count"],
             )
-            con.execute(
+            exec_sql(
+                con,
                 """
                 UPDATE papers
                 SET relevance_et = ?, impact_level = ?, sectors_json = ?

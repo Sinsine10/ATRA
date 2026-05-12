@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from atra.db import connect, init_db, insert_run, upsert_papers
+from atra.db import connect, exec_sql, init_db, insert_run, upsert_papers
 from atra.insights import generate_and_store_daily_insight
 from atra.sources.arxiv import ArxivIngestParams, fetch_arxiv
 from atra.sources.openalex import OpenAlexParams, fetch_openalex
@@ -94,7 +94,7 @@ def hours_since_last_insert(db_path: Path) -> Optional[float]:
     init_db(db_path)
     con = connect(db_path)
     try:
-        row = con.execute("SELECT MAX(inserted_at) AS m FROM papers").fetchone()
+        row = exec_sql(con, "SELECT MAX(inserted_at) AS m FROM papers").fetchone()
         raw = row["m"] if row else None
     finally:
         con.close()

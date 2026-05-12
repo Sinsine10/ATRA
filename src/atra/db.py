@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
+from typing import Any, Iterable, Optional, Sequence
 
 DEFAULT_DB_PATH = Path("data") / "atra.db"
 
-# Columns added after v0.1 — applied via _migrate()
 _EXTRA_COLUMNS = [
     ("relevance_et", "REAL"),
     ("impact_level", "TEXT"),
@@ -19,19 +18,69 @@ _EXTRA_COLUMNS = [
 ]
 
 
+def _database_url() -> str | None:
+    for key in ("ATRA_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
+        v = os.environ.get(key, "").strip()
+        if v.startswith(("postgresql://", "postgres://")):
+            return v
+    return None
+
+
+def using_postgres() -> bool:
+    return _database_url() is not None
+
+
+def database_backend_label() -> str:
+    return "postgresql" if using_postgres() else "sqlite"
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def connect(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(db_path))
+def order_coalesced_pub_ins_desc() -> str:
+    """ORDER BY clause: newest papers by published or inserted time."""
+    if using_postgres():
+        return "COALESCE(published_at::timestamptz, inserted_at::timestamptz) DESC NULLS LAST"
+    return "datetime(COALESCE(published_at, inserted_at)) DESC"
+
+
+def order_inserted_desc() -> str:
+    """ORDER BY clause: newest by ingest time."""
+    if using_postgres():
+        return "inserted_at::timestamptz DESC NULLS LAST"
+    return "datetime(inserted_at) DESC"
+
+
+def date_prefix_expr() -> str:
+    """Comparable calendar date (YYYY-MM-DD) from published or inserted."""
+    return "LEFT(COALESCE(published_at, inserted_at), 10)"
+
+
+def exec_sql(con: Any, sql: str, params: Sequence[Any] = ()) -> Any:
+    """Run SQL with ``?`` placeholders (normalized to %%s on PostgreSQL)."""
+    if using_postgres():
+        sql = sql.replace("?", "%s")
+        return con.execute(sql, tuple(params))
+    return con.execute(sql, tuple(params))
+
+
+def connect(db_path: Path | None = None) -> Any:
+    path = DEFAULT_DB_PATH if db_path is None else Path(db_path)
+    url = _database_url()
+    if url:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        return psycopg.connect(url, row_factory=dict_row)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(path))
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON;")
     return con
 
 
-def _migrate(con: sqlite3.Connection) -> None:
+def _migrate_sqlite(con: sqlite3.Connection) -> None:
     for col, coltype in _EXTRA_COLUMNS:
         try:
             con.execute(f"ALTER TABLE papers ADD COLUMN {col} {coltype};")
@@ -43,8 +92,72 @@ def _migrate(con: sqlite3.Connection) -> None:
         pass
 
 
-def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
-    con = connect(db_path)
+def _init_postgres(con: Any) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runs (
+          id BIGSERIAL PRIMARY KEY,
+          started_at TEXT NOT NULL,
+          source TEXT NOT NULL,
+          params_json TEXT NOT NULL
+        );
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS papers (
+          id BIGSERIAL PRIMARY KEY,
+          source TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          url TEXT,
+          title TEXT NOT NULL,
+          abstract TEXT,
+          published_at TEXT,
+          updated_at TEXT,
+          authors_json TEXT,
+          categories_json TEXT,
+          summary TEXT,
+          relevance_et DOUBLE PRECISION,
+          impact_level TEXT,
+          sectors_json TEXT,
+          cited_by_count INTEGER,
+          inserted_at TEXT NOT NULL,
+          UNIQUE(source, external_id)
+        );
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_papers_source_published
+          ON papers(source, published_at);
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_insights (
+          report_for_date TEXT NOT NULL PRIMARY KEY,
+          generated_at TEXT NOT NULL,
+          payload_json TEXT NOT NULL
+        );
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_papers_impact ON papers(impact_level);"
+    )
+
+
+def init_db(db_path: Path | None = None) -> None:
+    path = DEFAULT_DB_PATH if db_path is None else Path(db_path)
+    if using_postgres():
+        con = connect(path)
+        try:
+            _init_postgres(con)
+            con.commit()
+        finally:
+            con.close()
+        return
+
+    con = connect(path)
     try:
         con.executescript(
             """
@@ -85,7 +198,7 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> None:
             );
             """
         )
-        _migrate(con)
+        _migrate_sqlite(con)
         try:
             con.execute(
                 "CREATE INDEX IF NOT EXISTS idx_papers_impact ON papers(impact_level);"
@@ -115,20 +228,72 @@ class PaperRow:
     cited_by_count: Optional[int] = None
 
 
-def insert_run(con: sqlite3.Connection, *, source: str, params_json: str) -> int:
-    cur = con.execute(
+def insert_run(con: Any, *, source: str, params_json: str) -> int:
+    now = utc_now_iso()
+    if using_postgres():
+        row = exec_sql(
+            con,
+            """
+            INSERT INTO runs(started_at, source, params_json)
+            VALUES (?, ?, ?) RETURNING id
+            """,
+            (now, source, params_json),
+        ).fetchone()
+        return int(row["id"]) if row else 0
+    cur = exec_sql(
+        con,
         "INSERT INTO runs(started_at, source, params_json) VALUES (?, ?, ?)",
-        (utc_now_iso(), source, params_json),
+        (now, source, params_json),
     )
     return int(cur.lastrowid)
 
 
-def upsert_papers(con: sqlite3.Connection, rows: Iterable[PaperRow]) -> tuple[int, int]:
+def upsert_papers(con: Any, rows: Iterable[PaperRow]) -> tuple[int, int]:
     inserted = 0
     skipped = 0
+    now = utc_now_iso()
+    if using_postgres():
+        sql = """
+            INSERT INTO papers(
+              source, external_id, url, title, abstract,
+              published_at, updated_at, authors_json, categories_json,
+              summary, relevance_et, impact_level, sectors_json, cited_by_count,
+              inserted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source, external_id) DO NOTHING
+            """
+        for r in rows:
+            cur = exec_sql(
+                con,
+                sql,
+                (
+                    r.source,
+                    r.external_id,
+                    r.url,
+                    r.title,
+                    r.abstract,
+                    r.published_at,
+                    r.updated_at,
+                    r.authors_json,
+                    r.categories_json,
+                    r.summary,
+                    r.relevance_et,
+                    r.impact_level,
+                    r.sectors_json,
+                    r.cited_by_count,
+                    now,
+                ),
+            )
+            if cur.rowcount and cur.rowcount > 0:
+                inserted += 1
+            else:
+                skipped += 1
+        return inserted, skipped
+
     for r in rows:
         try:
-            con.execute(
+            exec_sql(
+                con,
                 """
                 INSERT INTO papers(
                   source, external_id, url, title, abstract,
@@ -152,7 +317,7 @@ def upsert_papers(con: sqlite3.Connection, rows: Iterable[PaperRow]) -> tuple[in
                     r.impact_level,
                     r.sectors_json,
                     r.cited_by_count,
-                    utc_now_iso(),
+                    now,
                 ),
             )
             inserted += 1
@@ -161,13 +326,14 @@ def upsert_papers(con: sqlite3.Connection, rows: Iterable[PaperRow]) -> tuple[in
     return inserted, skipped
 
 
-def list_papers(con: sqlite3.Connection, *, limit: int = 10) -> list[sqlite3.Row]:
-    cur = con.execute(
-        """
+def list_papers(con: Any, *, limit: int = 10) -> list[Any]:
+    cur = exec_sql(
+        con,
+        f"""
         SELECT id, source, external_id, title, published_at, url, summary,
                relevance_et, impact_level, sectors_json
         FROM papers
-        ORDER BY datetime(inserted_at) DESC
+        ORDER BY {order_inserted_desc()}
         LIMIT ?
         """,
         (limit,),
@@ -176,7 +342,7 @@ def list_papers(con: sqlite3.Connection, *, limit: int = 10) -> list[sqlite3.Row
 
 
 def query_papers(
-    con: sqlite3.Connection,
+    con: Any,
     *,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
@@ -187,16 +353,15 @@ def query_papers(
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
-    """Filter papers. Optional sector matches json_extract on sectors_json array."""
+    dpe = date_prefix_expr()
     clauses: list[str] = ["1=1"]
     params: list[Any] = []
 
-    # Compare calendar dates using ISO prefix YYYY-MM-DD
     if date_from:
-        clauses.append("substr(COALESCE(published_at, inserted_at), 1, 10) >= ?")
+        clauses.append(f"{dpe} >= ?")
         params.append(date_from[:10])
     if date_to:
-        clauses.append("substr(COALESCE(published_at, inserted_at), 1, 10) <= ?")
+        clauses.append(f"{dpe} <= ?")
         params.append(date_to[:10])
     if impact:
         clauses.append("LOWER(COALESCE(impact_level,'')) = LOWER(?)")
@@ -211,31 +376,32 @@ def query_papers(
         )
         params.extend([like, like, like])
     if sector:
-        # sectors_json contains "sector":"Name" — LIKE works without JSON1
         clauses.append("LOWER(COALESCE(sectors_json,'')) LIKE ?")
         params.append(f"%{sector.lower()}%")
 
     where_sql = " AND ".join(clauses)
+    ob = order_coalesced_pub_ins_desc()
     sql = f"""
         SELECT id, source, external_id, url, title, abstract, published_at, summary,
                relevance_et, impact_level, sectors_json, cited_by_count, categories_json
         FROM papers
         WHERE {where_sql}
-        ORDER BY datetime(COALESCE(published_at, inserted_at)) DESC
+        ORDER BY {ob}
         LIMIT ? OFFSET ?
     """
     params.extend([limit, offset])
-    cur = con.execute(sql, params)
+    cur = exec_sql(con, sql, params)
     return [dict(r) for r in cur.fetchall()]
 
 
-def count_papers(con: sqlite3.Connection) -> int:
-    row = con.execute("SELECT COUNT(*) AS c FROM papers").fetchone()
+def count_papers(con: Any) -> int:
+    row = exec_sql(con, "SELECT COUNT(*) AS c FROM papers").fetchone()
     return int(row["c"]) if row else 0
 
 
-def get_paper_by_id(con: sqlite3.Connection, paper_id: int) -> Optional[dict[str, Any]]:
-    cur = con.execute(
+def get_paper_by_id(con: Any, paper_id: int) -> Optional[dict[str, Any]]:
+    cur = exec_sql(
+        con,
         """
         SELECT id, source, external_id, url, title, abstract, published_at, summary,
                relevance_et, impact_level, sectors_json, cited_by_count, authors_json, categories_json
@@ -247,25 +413,26 @@ def get_paper_by_id(con: sqlite3.Connection, paper_id: int) -> Optional[dict[str
     return dict(r) if r else None
 
 
-def papers_for_trends(con: sqlite3.Connection) -> list[sqlite3.Row]:
-    return list(
-        con.execute(
-            """
-            SELECT id, published_at, sectors_json, title, abstract, summary, inserted_at
-            FROM papers
-            WHERE published_at IS NOT NULL OR inserted_at IS NOT NULL
-            """
-        ).fetchall()
+def papers_for_trends(con: Any) -> list[Any]:
+    cur = exec_sql(
+        con,
+        """
+        SELECT id, published_at, sectors_json, title, abstract, summary, inserted_at
+        FROM papers
+        WHERE published_at IS NOT NULL OR inserted_at IS NOT NULL
+        """,
     )
+    return list(cur.fetchall())
 
 
 def save_daily_insight(
-    con: sqlite3.Connection,
+    con: Any,
     *,
     report_for_date: str,
     payload: dict[str, Any],
 ) -> None:
-    con.execute(
+    exec_sql(
+        con,
         """
         INSERT INTO daily_insights(report_for_date, generated_at, payload_json)
         VALUES (?, ?, ?)
@@ -277,14 +444,15 @@ def save_daily_insight(
     )
 
 
-def get_latest_daily_insight(con: sqlite3.Connection) -> Optional[dict[str, Any]]:
-    row = con.execute(
+def get_latest_daily_insight(con: Any) -> Optional[dict[str, Any]]:
+    row = exec_sql(
+        con,
         """
         SELECT report_for_date, generated_at, payload_json
         FROM daily_insights
         ORDER BY report_for_date DESC
         LIMIT 1
-        """
+        """,
     ).fetchone()
     if not row:
         return None
@@ -294,8 +462,9 @@ def get_latest_daily_insight(con: sqlite3.Connection) -> Optional[dict[str, Any]
     return data
 
 
-def list_daily_insights(con: sqlite3.Connection, *, limit: int = 14) -> list[dict[str, Any]]:
-    rows = con.execute(
+def list_daily_insights(con: Any, *, limit: int = 14) -> list[dict[str, Any]]:
+    rows = exec_sql(
+        con,
         """
         SELECT report_for_date, generated_at, payload_json
         FROM daily_insights

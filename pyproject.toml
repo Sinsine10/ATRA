@@ -9,6 +9,7 @@ description = "Automated Tech-Trend & Research Analyzer (ATRA) — MInT"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "psycopg[binary]>=3.2.0",
   "requests>=2.32.0",
   "feedparser>=6.0.11",
   "pydantic>=2.7.0",

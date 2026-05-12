@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from atra.db import DEFAULT_DB_PATH, connect, init_db
+from atra.db import DEFAULT_DB_PATH, connect, exec_sql, init_db
 
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
@@ -28,7 +28,8 @@ def summarize_missing(
     init_db(path)
     con = connect(path)
     try:
-        cur = con.execute(
+        cur = exec_sql(
+            con,
             """
             SELECT id, abstract
             FROM papers
@@ -47,7 +48,8 @@ def summarize_missing(
             summary = simple_3_sentence_summary(str(r["abstract"]))
             if not summary:
                 continue
-            con.execute(
+            exec_sql(
+                con,
                 "UPDATE papers SET summary = ? WHERE id = ?",
                 (summary, int(r["id"])),
             )

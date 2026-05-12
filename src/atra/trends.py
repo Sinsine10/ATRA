@@ -6,7 +6,14 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from atra.db import DEFAULT_DB_PATH, connect, init_db, papers_for_trends
+from atra.db import (
+    DEFAULT_DB_PATH,
+    connect,
+    exec_sql,
+    init_db,
+    order_coalesced_pub_ins_desc,
+    papers_for_trends,
+)
 
 
 def _day_key(iso_ts: str | None) -> str | None:
@@ -70,10 +77,11 @@ def top_tokens(
     con = connect(path)
     try:
         rows = list(
-            con.execute(
-                """
+            exec_sql(
+                con,
+                f"""
                 SELECT title, abstract, summary FROM papers
-                ORDER BY datetime(COALESCE(published_at, inserted_at)) DESC
+                ORDER BY {order_coalesced_pub_ins_desc()}
                 LIMIT ?
                 """,
                 (max_papers,),
@@ -104,13 +112,14 @@ def early_signals(db_path: Path | None = None, recent_days: int = 14) -> list[di
     con = connect(path)
     try:
         rows = list(
-            con.execute(
-                """
+            exec_sql(
+                con,
+                f"""
                 SELECT id, title, published_at, relevance_et, impact_level, sectors_json, url, source
                 FROM papers
-                ORDER BY datetime(COALESCE(published_at, inserted_at)) DESC
+                ORDER BY {order_coalesced_pub_ins_desc()}
                 LIMIT 500
-                """
+                """,
             ).fetchall()
         )
     finally:
